@@ -11,7 +11,7 @@ if ($CurrentTLS -notlike "*Tls12" -and $CurrentTLS -notlike "*Tls13") {
 	Write-Host "This device is using an old version of TLS. Temporarily changed to use TLS v1.2."
 }
 
-$Query = "SELECT MemberCode, LastName FROM Jonasnet.dbo.tblPvxMembers WHERE MemberStatus = 18" # The sql query that returns the list of members
+$Query = "SELECT MemberCode, LastName FROM Jonasnet.dbo.tblPvxMembers WHERE MemberStatus IN (7, 8, 9, 10, 13, 18, 19, 20, 22, 23, 24, 25, 26, 28, 29, 30, 32, 33, 36, 37, 47, 48, 49, 50, 88, 89, 100, 101, 110, 111)" # The sql query that returns the list of members
 $UserExport = Invoke-Sqlcmd -Query $Query -ConnectionString $DBConnString
 
 $WifiCSV = @()
