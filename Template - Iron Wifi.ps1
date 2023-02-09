@@ -2,6 +2,14 @@
 $DBConnString = "Data Source=<SERVER\DATA SOURCE>;Database=<DATABASE>;Integrated Security=True;ApplicationIntent=ReadOnly"
 $APIUrl = "https://us-west1.ironwifi.com/api/"
 $APIKey = "<API KEY>" # The iron wifi api key
+$MemberQuery = "SELECT MemberCode, LastName FROM Database.dbo.Members WHERE MemberStatus IN (1)" # The sql query that returns the list of members
+
+# ITG details just for updating the Last Run asset
+$ITG_APIKEy =  ""
+$ITG_APIEndpoint = "https://api.itglue.com"
+$orgID = ""
+$ScriptsLastRunFlexAssetName = "Scripts - Last Run"
+$LastUpdatedUpdater_APIURL = ""
 ####################################################################
 
 # Ensure they are using the latest TLS version
@@ -11,8 +19,7 @@ if ($CurrentTLS -notlike "*Tls12" -and $CurrentTLS -notlike "*Tls13") {
 	Write-Host "This device is using an old version of TLS. Temporarily changed to use TLS v1.2."
 }
 
-$Query = "SELECT MemberCode, LastName FROM Jonasnet.dbo.tblPvxMembers WHERE MemberStatus IN (7, 8, 9, 10, 13, 18, 19, 20, 22, 23, 24, 25, 26, 28, 29, 30, 32, 33, 36, 37, 47, 48, 49, 50, 88, 89, 100, 101, 110, 111)" # The sql query that returns the list of members
-$UserExport = Invoke-Sqlcmd -Query $Query -ConnectionString $DBConnString
+$UserExport = Invoke-Sqlcmd -Query $MemberQuery -ConnectionString $DBConnString
 
 $WifiCSV = @()
 
@@ -36,6 +43,7 @@ $WifiCSV_Converted = $WifiCSV | ConvertTo-Csv -NoTypeInformation
 $WifiCSV_Encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($WifiCSV_Converted -join [Environment]::NewLine))
 
 $ConnectorsAPI = $APIUrl + "connectors"
+$UsersAPI = $APIUrl + "users"
 $APIHeaders = @{
     Authorization="Bearer $APIKey"
 	accept = "application/json"
@@ -51,38 +59,99 @@ try {
 }
 
 if ($Response) {
-	# Delete existing connector if it exists
+	# Replace the existing connector if it exists
 	if ($Response._embedded.connectors) {
 		foreach ($Connector in $Response._embedded.connectors) {
 			if ($Connector.name -like "Guest Wifi CSV") {
 				$ID = $Connector.id
+
 				if ($ID) {
+					$ConnectorBody = @{
+						filename = "guest_wifi.csv"
+						csvFile = "data:text/csv;base64,$WifiCSV_Encoded"
+					} | ConvertTo-Json
+			
+					$Success = $false
 					try {
-						$Response = Invoke-RestMethod -Uri ($ConnectorsAPI + "/" + $ID + "?delete_users=true") -Method 'DELETE' -Headers $APIHeaders
-						Write-Host "Deleted the existing connector successfully." -ForegroundColor Green
+						Invoke-RestMethod -Uri ($ConnectorsAPI + "/" + $ID) -Method 'PATCH' -Headers $APIHeaders -Body $ConnectorBody -ContentType 'application/json'
+						Write-Host "Updated connector, ID: $($ID)" -ForegroundColor Green
+						$Success = $true
 					} catch {
-						Write-Host "Could not delete the existing connector." -ForegroundColor Red
-						Write-Error "Could not delete the existing connector."
+						Write-Host "Could not upload the list of users for the reason: " + $_.Exception.Message -ForegroundColor Red
+						Write-Error "Could not upload the list of users for the reason: " + $_.Exception.Message
 					}
 				}
 			}
 		}
 	}
 
-	# Send the create connector api command
-	$ConnectorBody = @{
-		name = "Guest Wifi CSV"
-		dbtype = "csv"
-		filename = "guest_wifi.csv"
-		csvFile = "data:text/csv;base64,$WifiCSV_Encoded"
-	} | ConvertTo-Json
+	if (
+		$Response -and $Response._embedded -and $Response._embedded.PSobject.Properties.Name -contains "connectors" -and 
+		(($Response._embedded.connectors | Measure-Object).Count -eq 0 -or $Response._embedded.connectors.name -notlike "Guest Wifi CSV")
+	) {
+		# Send the create connector api command
+		$ConnectorBody = @{
+			name = "Guest Wifi CSV"
+			dbtype = "csv"
+			filename = "guest_wifi.csv"
+			csvFile = "data:text/csv;base64,$WifiCSV_Encoded"
+		} | ConvertTo-Json
 
-	try {
-		$Response = Invoke-RestMethod -Uri $ConnectorsAPI -Method 'POST' -Headers $APIHeaders -Body $ConnectorBody -ContentType 'application/json'
-		Write-Host "Created new connector, ID: ${$Response.id}" -ForegroundColor Green
-	} catch {
-		Write-Host "Could not upload the list of users for the reason: " + $_.Exception.Message -ForegroundColor Red
-		Write-Error "Could not upload the list of users for the reason: " + $_.Exception.Message
+		$Success = $false
+		try {
+			$Response = Invoke-RestMethod -Uri $ConnectorsAPI -Method 'POST' -Headers $APIHeaders -Body $ConnectorBody -ContentType 'application/json'
+			Write-Host "Created new connector, ID: $($Response.id)" -ForegroundColor Green
+			$Success = $true
+		} catch {
+			Write-Host "Could not upload the list of users for the reason: " + $_.Exception.Message -ForegroundColor Red
+			Write-Error "Could not upload the list of users for the reason: " + $_.Exception.Message
+		}
+	}
+}
+
+if ($Success -and $ITG_APIKEy -and $ITG_APIEndpoint -and $orgID -and $ScriptsLastRunFlexAssetName -and $LastUpdatedUpdater_APIURL) {
+	If (Get-Module -ListAvailable -Name "ITGlueAPI") { 
+		Import-module ITGlueAPI 
+	} else { 
+		Install-Module ITGlueAPI -Force
+		Import-Module ITGlueAPI
+	}
+
+	Add-ITGlueBaseURI -base_uri $ITG_APIEndpoint
+	Add-ITGlueAPIKey $ITG_APIKEy
+	$ScriptsLastRunFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $ScriptsLastRunFlexAssetName).data
+	Write-Host "Configured the ITGlue API"
+
+	if ($ScriptsLastRunFilterID -and $orgID) {
+		$LastUpdatedPage = Get-ITGlueFlexibleAssets -filter_flexible_asset_type_id $ScriptsLastRunFilterID.id -filter_organization_id $orgID
+
+		if ($LastUpdatedPage -and $LastUpdatedPage.data) {
+			$CustomScriptsTxt = $LastUpdatedPage.data.attributes.traits."custom-scripts"
+
+			if ($CustomScriptsTxt -like "*Iron Wifi Updater: *") {
+				$CustomScriptsTxt = $CustomScriptsTxt -replace "(<div>)?Iron Wifi Updater: .*?(\n|<\/div>|$)", ""
+			}
+			$CustomScriptsTxt += "Iron Wifi Updater: $((Get-Date).ToString("yyyy-MM-dd"))"
+
+			$Headers = @{
+				"x-api-key" = $ITG_APIKEy
+			}
+			$Body = @{
+				"apiurl" = $ITG_APIEndpoint
+				"itgOrgID" = $orgID
+				"HostDevice" = $env:computername
+				"custom-scripts" = $CustomScriptsTxt
+			}
+		
+			$Params = @{
+				Method = "Post"
+				Uri = $LastUpdatedUpdater_APIURL
+				Headers = $Headers
+				Body = ($Body | ConvertTo-Json)
+				ContentType = "application/json"
+			}			
+			Invoke-RestMethod @Params 
+		}
 	}
 }
 
