@@ -127,6 +127,9 @@ if ($Success -and $ITG_APIKEy -and $ITG_APIEndpoint -and $orgID -and $ScriptsLas
 
 		if ($LastUpdatedPage -and $LastUpdatedPage.data) {
 			$CustomScriptsTxt = $LastUpdatedPage.data.attributes.traits."custom-scripts"
+			if ($CustomScriptsTxt -is [array]) {
+				$CustomScriptsTxt = $CustomScriptsTxt -join "`n"
+			}
 
 			if ($CustomScriptsTxt -like "*Iron Wifi Updater: *") {
 				$CustomScriptsTxt = $CustomScriptsTxt -replace "(<div>)?Iron Wifi Updater: .*?(\n|<\/div>|$)", ""
